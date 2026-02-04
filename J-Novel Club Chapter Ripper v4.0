@@ -1,0 +1,287 @@
+// ==UserScript==
+// @name         J-Novel Club Chapter Ripper
+// @namespace    http://tampermonkey.net/
+// @version      4.0
+// @description  Downloads images from J-Novel Club as a ZIP. High performance, low memory usage, and background processing.
+// @author       ozler365 (Modified)
+// @license      MIT
+// @match        https://labs.j-novel.club/embed/v2/*
+// @icon         https://play-lh.googleusercontent.com/7nPAJjEXNWjxfQtG3JwwwEXGXm4Tr6ncoOkhzx27omrBQ8v1MmmEWGFZfxwcACX7iEo=w480-h960
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Configuration for performance tuning
+    const CONFIG = {
+        minSize: 10,           // Minimum dimension to consider an image
+        scanInterval: 2000,    // Check for new images every 2 seconds
+        chunkSize: 30,         // Process 30 elements at a time to prevent lag
+        autoScan: true
+    };
+
+    class ImageDownloader {
+        constructor() {
+            this.images = new Map(); // Stores: { url, width, height, blob }
+            this.isScanning = false;
+            this.scanTimer = null;
+            
+            this.createUI();
+            this.setupScrollDetection();
+            this.startAutoScan();
+            this.startConversionWorker();
+        }
+
+        createUI() {
+            const menu = document.createElement('div');
+            menu.id = 'jnovel-downloader-menu';
+            menu.innerHTML = `
+                <div class="menu-content">
+                    <div class="status-row">
+                        <span class="status-title">J-Novel Downloader</span>
+                        <span class="status-count" id="count-display">0 / 0</span>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress-fill"></div>
+                        </div>
+                    </div>
+                    <button id="download-btn" class="btn-download">
+                        Download ZIP
+                    </button>
+                </div>
+            `;
+
+            const style = document.createElement('style');
+            style.textContent = `
+                #jnovel-downloader-menu {
+                    position: fixed; bottom: 20px; right: 20px; width: 220px;
+                    background: #fff; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+                    z-index: 999999; font-family: sans-serif; padding: 12px; font-size: 13px;
+                }
+                .menu-content { display: flex; flex-direction: column; gap: 8px; }
+                .status-row { display: flex; justify-content: space-between; align-items: center; color: #4b5563; }
+                .status-title { font-weight: 600; color: #1f2937; }
+                .status-count { font-family: monospace; font-weight: 600; }
+                .progress-container { width: 100%; background: #e5e7eb; border-radius: 3px; overflow: hidden; height: 6px; }
+                .progress-fill { height: 100%; background: #667eea; width: 0%; transition: width 0.3s ease; }
+                .btn-download {
+                    width: 100%; padding: 8px; border: none; border-radius: 6px;
+                    background: #10b981; color: #fff; font-weight: 600; cursor: pointer;
+                }
+                .btn-download:hover { background: #059669; }
+                .btn-download:disabled { background: #9ca3af; cursor: wait; }
+            `;
+
+            document.head.appendChild(style);
+            document.body.appendChild(menu);
+            
+            // Simple Drag Logic
+            let isDragging = false;
+            let startX, startY, initialLeft, initialTop;
+            
+            menu.onmousedown = (e) => {
+                if(e.target.tagName === 'BUTTON') return;
+                isDragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                initialLeft = menu.offsetLeft;
+                initialTop = menu.offsetTop;
+                menu.style.cursor = 'grabbing';
+            };
+            
+            document.onmousemove = (e) => {
+                if (!isDragging) return;
+                e.preventDefault();
+                menu.style.left = (initialLeft + e.clientX - startX) + "px";
+                menu.style.top = (initialTop + e.clientY - startY) + "px";
+                menu.style.right = "auto";
+                menu.style.bottom = "auto";
+            };
+            
+            document.onmouseup = () => { isDragging = false; menu.style.cursor = 'default'; };
+
+            document.getElementById('download-btn').addEventListener('click', () => this.downloadAll());
+        }
+
+        setupScrollDetection() {
+            let scrollTimeout;
+            window.addEventListener('scroll', () => {
+                if (!CONFIG.autoScan) return;
+                clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => { if (!this.isScanning) this.scanPage(); }, 500);
+            }, { passive: true });
+        }
+
+        startAutoScan() {
+            if (this.scanTimer) clearInterval(this.scanTimer);
+            this.scanTimer = setInterval(() => { if (!this.isScanning) this.scanPage(); }, CONFIG.scanInterval);
+        }
+
+        isValidImage(url, width, height) {
+            if (!url) return false;
+            if (url.startsWith('data:') && url.length < 1000) return false; // Ignore tiny base64
+            // Check dimensions to ignore icons/thumbnails
+            return !(width > 0 && height > 0 && width < CONFIG.minSize && height < CONFIG.minSize);
+        }
+
+        async scanPage() {
+            if (this.isScanning) return;
+            this.isScanning = true;
+
+            const seen = new Set(this.images.keys());
+            // Target specific elements to reduce overhead
+            const allElements = Array.from(document.querySelectorAll('img, canvas'));
+            const newImages = [];
+
+            // Chunked processing to prevent UI lag
+            for (let i = 0; i < allElements.length; i += CONFIG.chunkSize) {
+                const chunk = allElements.slice(i, i + CONFIG.chunkSize);
+                
+                chunk.forEach(el => {
+                    let src = null, w = 0, h = 0;
+                    
+                    if (el.tagName === 'IMG') {
+                        src = el.dataset.src || el.getAttribute('data-src') || el.src;
+                        w = el.naturalWidth;
+                        h = el.naturalHeight;
+                    } else if (el.tagName === 'CANVAS') {
+                        // Canvas is handled differently, requires conversion immediately if not cached
+                        // But we just grab the element reference for now to avoid sync lag
+                        try { src = el.toDataURL(); w = el.width; h = el.height; } catch(e){}
+                    }
+
+                    if (!src) return;
+
+                    // Normalize URL
+                    if (!src.startsWith('data:') && !src.startsWith('blob:') && !src.startsWith('http')) {
+                        try { src = new URL(src, window.location.href).href; } catch { return; }
+                    }
+
+                    // Check if unique and valid
+                    if (src && !seen.has(src) && this.isValidImage(src, w, h)) {
+                        newImages.push({ url: src, width: w, height: h, blob: null, converting: false });
+                    }
+                });
+                
+                // Yield to main thread
+                await new Promise(r => requestAnimationFrame(r));
+            }
+
+            if (newImages.length > 0) {
+                newImages.forEach(img => this.images.set(img.url, img));
+                this.updateUI();
+            }
+            
+            this.isScanning = false;
+        }
+
+        // Optimized: Uses toBlob (Async) instead of toDataURL (Sync) to prevent freezing
+        async convertToBlob(url) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                img.onload = () => {
+                    try {
+                        const canvas = document.createElement("canvas");
+                        canvas.width = img.naturalWidth;
+                        canvas.height = img.naturalHeight;
+                        canvas.getContext("2d").drawImage(img, 0, 0);
+                        // toBlob is lighter on the CPU and memory than toDataURL
+                        canvas.toBlob((blob) => {
+                            resolve(blob);
+                        }, 'image/png');
+                    } catch (e) { resolve(null); }
+                };
+                img.onerror = () => resolve(null);
+                img.src = url;
+            });
+        }
+
+        async startConversionWorker() {
+            while (true) {
+                // Find next image needing conversion
+                const target = Array.from(this.images.values()).find(img => !img.blob && !img.converting);
+                
+                if (target) {
+                    target.converting = true;
+                    const blob = await this.convertToBlob(target.url);
+                    if (blob) {
+                        target.blob = blob;
+                        this.updateUI();
+                    } else {
+                        target.converting = false; // Retry later or leave as failed
+                    }
+                    // Small delay to allow UI updates
+                    await new Promise(r => setTimeout(r, 20));
+                } else {
+                    // Nothing to do, sleep
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            }
+        }
+
+        async downloadAll() {
+            const readyImages = Array.from(this.images.values()).filter(img => img.blob);
+            if (readyImages.length === 0) { alert('No images captured yet. Scroll through the chapter first.'); return; }
+
+            const btn = document.getElementById('download-btn');
+            const originalText = btn.textContent;
+            btn.textContent = 'Generating ZIP...';
+            btn.disabled = true;
+
+            try {
+                const zip = new JSZip();
+                
+                // Improved Title Sanitization for File Name
+                let title = document.title || "J-Novel_Download";
+                // Remove chars that are illegal in file names: / \ : * ? " < > |
+                title = title.replace(/[\\/:*?"<>|]/g, "-").trim();
+                // If title becomes empty after cleaning, fallback
+                if (!title) title = "J-Novel_Images";
+
+                readyImages.forEach((img, i) => {
+                    const ext = 'png';
+                    const filename = `${title}_${String(i + 1).padStart(3, '0')}.${ext}`;
+                    // Add Blob directly to ZIP (Memory Efficient)
+                    zip.file(filename, img.blob);
+                });
+
+                const content = await zip.generateAsync({type:"blob"});
+                saveAs(content, `${title}.zip`);
+                
+                btn.textContent = 'Done!';
+            } catch (e) {
+                console.error("Zip Error:", e);
+                alert('Error creating ZIP file.');
+            }
+
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }, 3000);
+        }
+
+        updateUI() {
+            requestAnimationFrame(() => {
+                const total = this.images.size;
+                const done = Array.from(this.images.values()).filter(img => img.blob).length;
+                
+                document.getElementById('count-display').textContent = `${done} / ${total}`;
+                
+                const pct = total > 0 ? (done / total) * 100 : 0;
+                document.getElementById('progress-fill').style.width = `${pct}%`;
+            });
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => new ImageDownloader());
+    } else {
+        new ImageDownloader();
+    }
+})();
