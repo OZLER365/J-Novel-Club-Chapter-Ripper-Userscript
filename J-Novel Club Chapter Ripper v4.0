@@ -3,8 +3,8 @@
 // @namespace    http://tampermonkey.net/
 // @version      4.0
 // @description  Downloads images from J-Novel Club as a ZIP. High performance, low memory usage, and background processing.
-// @author       ozler365 (Modified)
-// @license      MIT
+// @author       ozler365
+// @license      GPL-3.0-only
 // @match        https://labs.j-novel.club/embed/v2/*
 // @icon         https://play-lh.googleusercontent.com/7nPAJjEXNWjxfQtG3JwwwEXGXm4Tr6ncoOkhzx27omrBQ8v1MmmEWGFZfxwcACX7iEo=w480-h960
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
