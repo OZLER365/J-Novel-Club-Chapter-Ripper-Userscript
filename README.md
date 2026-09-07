@@ -1,3 +1,5 @@
+*AUTO SCROLL MIGHT FEEL SLOW BUT IT'S TOTALLY DEPENDS ON HOW FAST YOU IMAGE LOADS, IF YOU IMAGE LOADS FAST THEN IT'LL SCROLL BUT IF YOUR IMAGE LOADING SLOWING IT'LL WAIT
+
 *This is for educational purpose, don't repost the downloaded images
 
 Tamper Monkey recommended
