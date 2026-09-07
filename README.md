@@ -1,7 +1,8 @@
 *This is for educational purpose, don't repost the downloaded images
+
 Tamper Monkey recommended
 
-*Scroll to the end of the chapter and click on the download. The extra unnecessary images it downloads doesn't part of the chapter so just delete them, don't worry the order will stay same as the site
+Visit My Website - https://ozler365.github.io/ozler-s-works-info/#/repositories
 
 Help Keep This Userscript
 Updated and Running Smoothly
